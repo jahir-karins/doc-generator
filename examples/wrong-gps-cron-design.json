@@ -1,0 +1,355 @@
+{
+  "title": "Wrong GPS Location Cron",
+  "subtitle": "Backend Design Document",
+  "module": "karins_fastag_node",
+  "author": "Engineering",
+  "version": "1.0",
+  "overview": {
+    "problemStatement": "Fleet customers are sometimes charged at toll plazas where the vehicle GPS location at reader time is far from the plaza. The Wrong GPS cron detects these mismatches, creates WRONG_GPS claim candidates in toll_rate_verify, and emails operational summaries so disputes can be raised.",
+    "assumptions": [
+      "Only debit toll transactions (NETC_CORPORATE_DEBIT, DEEMED_ACCEPTANCE_DEBIT) with amount > 0 and a non-null RRN are eligible.",
+      "Customer must have gpsCheckingEnabled = 1 and the vehicle must be linked to an active vehicle_gps group with a non-empty API URL.",
+      "External GPS providers return success + lat/lon (lon or long) for the vehicle at txn reader time.",
+      "A mismatch is defined as Haversine distance > 10,000 meters (10 km) between toll plaza coordinates and GPS coordinates.",
+      "Data prepare looks at T-2 (Asia/Kolkata) so GPS provider history is available before validation.",
+      "WRONG_GPS claims feed the existing debit-adjustment / claim workflow via toll_rate_verify.transaction_type = WRONG_GPS."
+    ]
+  },
+  "database": {
+    "tables": [
+      {
+        "name": "vehicle_gps",
+        "purpose": "Per-customer GPS API groups. Vehicles link via vehicle.vehicle_gps_id; cron snapshots URL/token into temp rows.",
+        "columns": [
+          {
+            "name": "id",
+            "type": "INT",
+            "constraints": "PK, AUTO_INCREMENT",
+            "notes": "Group id"
+          },
+          {
+            "name": "customer_id",
+            "type": "INT",
+            "constraints": "NOT NULL, UK(customer_id, group_name)",
+            "notes": "Owning customer"
+          },
+          {
+            "name": "group_name",
+            "type": "VARCHAR(255)",
+            "constraints": "NOT NULL, UK with customer_id",
+            "notes": "Display / admin label"
+          },
+          {
+            "name": "gps_api_baseurl",
+            "type": "VARCHAR(500)",
+            "constraints": "NOT NULL",
+            "notes": "Template with {{vehicle_no}} and {{date_time}}"
+          },
+          {
+            "name": "gps_api_token_name",
+            "type": "VARCHAR(255)",
+            "constraints": "NULLABLE",
+            "notes": "Header name; default X-AT-AccessToken when empty at prepare"
+          },
+          {
+            "name": "gps_api_token",
+            "type": "VARCHAR(255)",
+            "constraints": "NULLABLE",
+            "notes": "Header value for provider auth"
+          },
+          {
+            "name": "status",
+            "type": "TINYINT",
+            "constraints": "NOT NULL, default 1",
+            "notes": "0 inactive, 1 active — only active groups are prepared"
+          }
+        ]
+      },
+      {
+        "name": "temp_gps_check_data",
+        "purpose": "Staging queue between data-prepare cron and GPS worker. Holds toll snapshot, API credentials, distance result, and claim insert outcome.",
+        "columns": [
+          {
+            "name": "id",
+            "type": "INT",
+            "constraints": "PK, AUTO_INCREMENT",
+            "notes": ""
+          },
+          {
+            "name": "vehicle_toll_history_id",
+            "type": "INT",
+            "constraints": "NULLABLE",
+            "notes": "Source vehicle_toll_history.id; skip if already staged"
+          },
+          {
+            "name": "toll_id / toll_name",
+            "type": "INT / VARCHAR",
+            "constraints": "",
+            "notes": "Plaza identity from txn"
+          },
+          {
+            "name": "toll_latitude / toll_longitude",
+            "type": "DECIMAL(20,5)",
+            "constraints": "",
+            "notes": "From toll master (create/update if missing)"
+          },
+          {
+            "name": "vehicle_no, customer_name, rrn, txn_reader_time, txn_amount",
+            "type": "mixed",
+            "constraints": "",
+            "notes": "Txn snapshot for API call and claim"
+          },
+          {
+            "name": "gps_api_base_url / token fields",
+            "type": "VARCHAR",
+            "constraints": "",
+            "notes": "Copied from vehicle_gps at prepare time"
+          },
+          {
+            "name": "received_lat / received_long / distance / distance_threshold",
+            "type": "DECIMAL",
+            "constraints": "",
+            "notes": "Filled by worker after provider response"
+          },
+          {
+            "name": "gps_api_call_status",
+            "type": "TINYINT",
+            "constraints": "",
+            "notes": "0=not setup, 1=pending, 2=processed"
+          },
+          {
+            "name": "gps_verification_result",
+            "type": "TINYINT",
+            "constraints": "",
+            "notes": "0=error/skip, 1=within 10km, 2=outside 10km (WRONG_GPS)"
+          },
+          {
+            "name": "toll_rate_verify_entry_status / msg",
+            "type": "TINYINT / TEXT",
+            "constraints": "",
+            "notes": "Whether WRONG_GPS row was created/updated in toll_rate_verify"
+          },
+          {
+            "name": "email_report_processed_at / status",
+            "type": "DATETIME / TINYINT",
+            "constraints": "status default 1",
+            "notes": "Report marks status=0 after email inclusion; rows older than ~10 days purged"
+          }
+        ]
+      },
+      {
+        "name": "toll_rate_verify",
+        "purpose": "Claim/verification work queue. Wrong GPS inserts transaction_type=WRONG_GPS with location_check_details JSON.",
+        "columns": [
+          {
+            "name": "id",
+            "type": "INT",
+            "constraints": "PK",
+            "notes": ""
+          },
+          {
+            "name": "rrn",
+            "type": "VARCHAR",
+            "constraints": "",
+            "notes": "Unique business key used for duplicate checks"
+          },
+          {
+            "name": "transaction_type",
+            "type": "VARCHAR",
+            "constraints": "",
+            "notes": "WRONG_GPS (also doubleDebit / wrongReturn interactions)"
+          },
+          {
+            "name": "verification_status",
+            "type": "VARCHAR",
+            "constraints": "",
+            "notes": "Set to verificationPending on create"
+          },
+          {
+            "name": "location_check_details",
+            "type": "JSON",
+            "constraints": "",
+            "notes": "tollLat/Lang, receivedLat/Lang, distance, receivedTime"
+          },
+          {
+            "name": "customer_id / vehicle_id",
+            "type": "INT",
+            "constraints": "",
+            "notes": "From vehicle_toll_history"
+          },
+          {
+            "name": "m2p_toll_id, toll_name, toll_rate, reader_date_time",
+            "type": "mixed",
+            "constraints": "",
+            "notes": "Plaza/txn snapshot for claim UI and PDFs"
+          }
+        ]
+      },
+      {
+        "name": "toll",
+        "purpose": "Toll plaza master used as geo reference. Prepare creates or backfills lat/long from txn location when missing.",
+        "columns": [
+          {
+            "name": "toll_id",
+            "type": "INT/STRING",
+            "constraints": "lookup key",
+            "notes": "Plaza id from bank txn"
+          },
+          {
+            "name": "latitude / longitude",
+            "type": "DECIMAL",
+            "constraints": "",
+            "notes": "Canonical plaza coordinates for distance calc"
+          }
+        ]
+      },
+      {
+        "name": "customer / vehicle (supporting)",
+        "purpose": "Eligibility gates and GPS group linkage.",
+        "columns": [
+          {
+            "name": "customer.gps_checking_enabled",
+            "type": "TINYINT/BOOL",
+            "constraints": "must be 1",
+            "notes": "Customer-level feature flag"
+          },
+          {
+            "name": "vehicle.vehicle_gps_id",
+            "type": "INT FK",
+            "constraints": "→ vehicle_gps.id",
+            "notes": "Must point to active group for prepare"
+          }
+        ]
+      }
+    ]
+  },
+  "apis": [
+    {
+      "method": "GET",
+      "route": "/vehicle-gps",
+      "purpose": "List GPS groups (paginated/filterable) for admin/customer setup"
+    },
+    {
+      "method": "GET",
+      "route": "/vehicle-gps/vehicles",
+      "purpose": "List assignable vehicles for a customer when creating/editing a GPS group"
+    },
+    {
+      "method": "POST",
+      "route": "/vehicle-gps",
+      "purpose": "Create GPS group (URL template, optional token, vehicleNos, status)"
+    },
+    {
+      "method": "PUT",
+      "route": "/vehicle-gps/:id",
+      "purpose": "Update GPS group credentials and vehicle assignments"
+    },
+    {
+      "method": "DELETE",
+      "route": "/vehicle-gps/:id",
+      "purpose": "Delete GPS group"
+    },
+    {
+      "method": "CRON",
+      "route": "Job 1 (daily ~01:30 IST) → startGpsLocationCheckDataPrepare()",
+      "purpose": "Stage T-2 debit txns into temp_gps_check_data"
+    },
+    {
+      "method": "CRON",
+      "route": "Job 6 every 5 min (03:30, then 04:00–23:55 IST) → startGpsLocationCheck()",
+      "purpose": "Call GPS APIs, compute distance, insert/update WRONG_GPS in toll_rate_verify"
+    },
+    {
+      "method": "CRON",
+      "route": "Job 7 01:00 IST → sendGPSLocationCheckReport()",
+      "purpose": "Fallback email report for previous day + purge ~10-day-old temp rows"
+    },
+    {
+      "method": "CRON",
+      "route": "Job 8 at 08/12/16/20 IST → triggerGpsLocationReport()",
+      "purpose": "Send current-day report only if no pending GPS API rows remain"
+    }
+  ],
+  "coreFlows": [
+    {
+      "name": "Data prepare (daily)",
+      "summary": "Loads eligible toll debits for T-2 and stages them for the GPS worker.",
+      "steps": [
+        "CRON Job 1 runs startGpsLocationCheckDataPrepare()",
+        "Select vehicle_toll_history for T-2 (IST) where txnType in NETC_CORPORATE_DEBIT / DEEMED_ACCEPTANCE_DEBIT, amount > 0, rrn not null",
+        "Require customer.gpsCheckingEnabled = 1 and vehicle → active vehicle_gps with non-empty URL",
+        "Skip if vehicle_toll_history_id already exists in temp_gps_check_data",
+        "Resolve/create/update toll lat-long from toll master (fallback to txn locationLat/Lang)",
+        "Insert temp_gps_check_data with gps_api_call_status = 1 and snapshotted API credentials",
+        "Email prepare summary (and Excel of failed inserts when any)"
+      ]
+    },
+    {
+      "name": "GPS location check worker",
+      "summary": "Consumes pending temp rows, compares GPS vs plaza, and raises WRONG_GPS candidates.",
+      "steps": [
+        "Every 5 minutes, load pending rows (status=1, gps_api_call_status in 0,1) in batches of 50, max 5 concurrent API calls",
+        "Replace {{vehicle_no}} / {{date_time}} in URL; call provider with token header when configured",
+        "Parse lat/lon from response; compute Haversine distance to toll coordinates",
+        "If distance ≤ 10 km → gps_verification_result = 1 (OK), no claim",
+        "If distance > 10 km → gps_verification_result = 2; create toll_rate_verify WRONG_GPS (or upgrade doubleDebit → WRONG_GPS; skip if already claimed otherwise)",
+        "When queue empties for the run, trigger sendGPSLocationCheckReport for current day"
+      ]
+    },
+    {
+      "name": "Email report & cleanup",
+      "summary": "Operational visibility for API errors and failed claim inserts.",
+      "steps": [
+        "Select temp rows for the report window with email_report_processed_at IS NULL",
+        "Mark each row status=0 and set email_report_processed_at",
+        "Count within-threshold / outside-threshold / API errors / toll_rate_verify insert failures",
+        "Attach Excel of exception rows and email via DAILY_RECONCILE_SERVICE email config",
+        "Delete temp_gps_check_data rows created around 10 days ago"
+      ]
+    }
+  ],
+  "coreLogic": [
+    {
+      "title": "Eligibility for prepare",
+      "description": "A txn enters the queue only when it is a positive debit with RRN, customer GPS checking is enabled, and the vehicle is tied to an active GPS group with a usable API base URL. Blank URL on an otherwise active group is skipped (nothing useful to call later)."
+    },
+    {
+      "title": "URL template substitution",
+      "description": "Admin stores provider URL templates with {{vehicle_no}} and {{date_time}}. Worker substitutes vehicle number and txn_reader_time before GET. Optional header uses gps_api_token_name + gps_api_token (supports providers like KTT and Magiva)."
+    },
+    {
+      "title": "10 km distance rule",
+      "description": "Distance is Haversine in meters. Threshold MAX_ALLOWED_DISTANCE_IN_METERS = 10000. Within threshold = valid location; beyond threshold = Wrong GPS candidate."
+    },
+    {
+      "title": "toll_rate_verify upsert rules",
+      "description": "No existing row (or existing wrongReturn) → create WRONG_GPS with verificationPending and location_check_details. Existing doubleDebit → update type to WRONG_GPS and attach location details. Any other existing type → do not insert; record failure message on temp row."
+    },
+    {
+      "title": "Status semantics on temp_gps_check_data",
+      "description": "gps_api_call_status: 0 not setup, 1 pending, 2 done. gps_verification_result: 0 error/config, 1 within threshold, 2 outside threshold. Report only emails exception-worthy rows (errors and failed claim inserts); successful within-threshold and successful claim inserts are counted but not listed."
+    }
+  ],
+  "validationRules": [
+    "Prepare: txnType must be NETC_CORPORATE_DEBIT or DEEMED_ACCEPTANCE_DEBIT",
+    "Prepare: txnAmount > 0 and rrn IS NOT NULL",
+    "Prepare: customer.gpsCheckingEnabled = 1",
+    "Prepare: vehicle must join active vehicle_gps (status=1) with non-empty gps_api_baseurl",
+    "Prepare: do not re-insert same vehicle_toll_history_id",
+    "Worker: reject invalid lat/long from toll master or GPS API (mark result 0)",
+    "Worker: provider response.success must be true to evaluate distance",
+    "Vehicle GPS API: groupName and gpsApiBaseurl required; status only 0 or 1; unique (customer_id, group_name)",
+    "Claim path: WRONG_GPS constant maps to claim type key 8 in constants"
+  ],
+  "edgeCases": [
+    "No pending temp rows → worker exits early; no report from that run",
+    "GPS API false/error/timeout → gps_verification_result=0, included in exception email",
+    "Toll lat/long missing → create/update toll from txn location; if still invalid numbers, skip claim",
+    "Provider returns long instead of lon → normalized before distance calc",
+    "RRN already in toll_rate_verify as non-doubleDebit/non-wrongReturn → claim not duplicated",
+    "doubleDebit already present → upgraded to WRONG_GPS with location details",
+    "Trigger report cron finds pending API rows → skips mail until queue drains",
+    "Prepare failures (validation/DB) → counted and attached as Excel to prepare notification",
+    "Temp retention: ~10-day-old created_at window deleted during report job"
+  ]
+}

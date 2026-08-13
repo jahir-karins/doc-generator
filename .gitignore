@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Generated documents
+output/
+*.docx
+
+# Keep example outputs out of git; regenerate locally
+!examples/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+.env

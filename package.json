@@ -1,0 +1,19 @@
+{
+  "name": "doc-generator",
+  "version": "1.0.0",
+  "description": "Generate branded Word design documents from structured JSON content",
+  "main": "src/index.js",
+  "bin": {
+    "doc-generator": "./src/cli.js"
+  },
+  "scripts": {
+    "generate": "node src/cli.js",
+    "generate:example": "node src/cli.js --type backend-design --input examples/backend-design.example.json --out output"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "docx": "^9.5.0"
+  }
+}

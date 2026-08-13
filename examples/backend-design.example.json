@@ -1,0 +1,136 @@
+{
+  "title": "Toll Adjustment Audit Module",
+  "subtitle": "Backend Design Document",
+  "module": "adhoc-toll-audit",
+  "author": "Engineering",
+  "version": "1.0",
+  "overview": {
+    "problemStatement": "Operators need a reliable way to upload toll transaction files, normalize inconsistent headers, and audit adjustment transactions against expected business rules.",
+    "assumptions": [
+      "Input files are CSV/XLSX with a single header row.",
+      "Column aliases may differ by bank or plaza but map to a fixed canonical schema.",
+      "Audit runs are idempotent per uploaded dataset."
+    ]
+  },
+  "database": {
+    "tables": [
+      {
+        "name": "audit_datasets",
+        "purpose": "One row per uploaded file / audit batch.",
+        "columns": [
+          {
+            "name": "id",
+            "type": "BIGINT",
+            "constraints": "PK, AUTO_INCREMENT",
+            "notes": "Primary key"
+          },
+          {
+            "name": "file_name",
+            "type": "VARCHAR(255)",
+            "constraints": "NOT NULL",
+            "notes": "Original upload name"
+          },
+          {
+            "name": "status",
+            "type": "ENUM",
+            "constraints": "NOT NULL",
+            "notes": "PENDING | PROCESSING | COMPLETED | FAILED"
+          },
+          {
+            "name": "created_at",
+            "type": "DATETIME",
+            "constraints": "NOT NULL",
+            "notes": "Upload timestamp"
+          }
+        ]
+      },
+      {
+        "name": "audit_transactions",
+        "purpose": "Normalized toll transactions belonging to a dataset.",
+        "columns": [
+          {
+            "name": "id",
+            "type": "BIGINT",
+            "constraints": "PK, AUTO_INCREMENT",
+            "notes": ""
+          },
+          {
+            "name": "dataset_id",
+            "type": "BIGINT",
+            "constraints": "FK → audit_datasets.id",
+            "notes": "Cascade on dataset delete"
+          },
+          {
+            "name": "txn_id",
+            "type": "VARCHAR(100)",
+            "constraints": "UNIQUE(dataset_id, txn_id)",
+            "notes": "Source transaction reference"
+          },
+          {
+            "name": "amount",
+            "type": "DECIMAL(12,2)",
+            "constraints": "NOT NULL",
+            "notes": "Canonical amount after parse"
+          }
+        ]
+      }
+    ]
+  },
+  "apis": [
+    {
+      "method": "POST",
+      "route": "/api/audit/datasets",
+      "purpose": "Upload a toll file and create a dataset for processing"
+    },
+    {
+      "method": "GET",
+      "route": "/api/audit/datasets/:id",
+      "purpose": "Fetch dataset status and summary counts"
+    },
+    {
+      "method": "GET",
+      "route": "/api/audit/datasets/:id/transactions",
+      "purpose": "List normalized transactions with filters"
+    },
+    {
+      "method": "POST",
+      "route": "/api/audit/datasets/:id/reprocess",
+      "purpose": "Re-run audit rules on an existing dataset"
+    }
+  ],
+  "coreFlows": [
+    {
+      "name": "Upload and audit",
+      "summary": "End-to-end path from file upload to completed audit.",
+      "steps": [
+        "Client uploads file to POST /api/audit/datasets",
+        "Service stores raw file and creates audit_datasets row (PENDING)",
+        "Parser normalizes headers using column aliases",
+        "Transactions are inserted into audit_transactions",
+        "Audit rules run; dataset status becomes COMPLETED or FAILED"
+      ]
+    }
+  ],
+  "coreLogic": [
+    {
+      "title": "Header normalization",
+      "description": "Incoming column names are mapped through aliases to a canonical schema. Unknown required columns fail the dataset early instead of silently dropping data."
+    },
+    {
+      "title": "Adjustment detection",
+      "description": "Adjustment transactions are identified by txn type / remarks patterns. Matching logic must remain consistent across banks so audits stay comparable."
+    }
+  ],
+  "validationRules": [
+    "File type must be CSV or XLSX",
+    "Required canonical columns must resolve after alias mapping",
+    "Amount must be a finite number",
+    "Duplicate txn_id within the same dataset is rejected"
+  ],
+  "edgeCases": [
+    "Empty file or header-only file → mark dataset FAILED with clear error",
+    "Partial alias match (some required columns missing) → fail before insert",
+    "Reprocess on COMPLETED dataset replaces derived audit flags, not raw rows",
+    "Concurrent uploads of the same file name are allowed; datasets remain independent"
+  ]
+}
