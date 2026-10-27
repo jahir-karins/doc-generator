@@ -36,9 +36,19 @@ npm run generate -- --type backend-design --input examples/my-feature.json --out
 
 | Type | Purpose |
 |------|---------|
-| `backend-design` | Backend design doc (Overview, DB, APIs, Flows, Logic, Rules, Edge cases) |
+| `backend-design` | Backend design doc aligned with Cursor rule sections |
 
 ## Content contract (`backend-design`)
+
+Sections match the Cursor **Create a Backend Design Document** rule:
+
+1. Overview  
+2. Database Design  
+3. APIs (purpose + request fields + response + errors)  
+4. Data Mapping (create / update / external)  
+5. Core Flows  
+6. Core Business Logic  
+7. Validations and Error Handling  
 
 ```json
 {
@@ -63,8 +73,22 @@ npm run generate -- --type backend-design --input examples/my-feature.json --out
     ]
   },
   "apis": [
-    { "method": "POST", "route": "/api/...", "purpose": "..." }
+    {
+      "method": "POST",
+      "route": "/api/...",
+      "purpose": "...",
+      "requestFields": ["field (type, required)"],
+      "response": "{ success, data }",
+      "errors": ["400 — ..."]
+    }
   ],
+  "dataMapping": {
+    "create": [
+      { "sourceField": "requestField", "databaseColumn": "table.column", "notes": "" }
+    ],
+    "update": [],
+    "external": []
+  },
   "coreFlows": [
     { "name": "Flow name", "summary": "...", "steps": ["Step 1", "Step 2"] }
   ],
@@ -75,6 +99,8 @@ npm run generate -- --type backend-design --input examples/my-feature.json --out
   "edgeCases": ["..."]
 }
 ```
+
+Sample input that exercises every section: `examples/sample-backend-design.json`.
 
 ## Project layout
 

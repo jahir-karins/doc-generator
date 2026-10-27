@@ -1,6 +1,7 @@
 /**
  * Backend design document → Word (.docx) generator.
- * Maps structured JSON sections into a consistent, review-ready design doc.
+ * Section order follows the Cursor "Create a Backend Design Document" rule:
+ * Overview → Database → APIs → Data Mapping → Core Flows → Core Logic → Validations.
  */
 const { Document } = require('docx');
 const {
@@ -44,6 +45,55 @@ function renderTableSection(table) {
 }
 
 /**
+ * Renders one API endpoint with optional request / response / error detail.
+ * Older JSON that only sets method/route/purpose still renders cleanly.
+ */
+function renderApiSection(api, index) {
+  const blocks = [
+    heading2(`${index + 1}. ${api.method} ${api.route}`),
+    bodyText(api.purpose || ''),
+  ];
+
+  if (Array.isArray(api.requestFields) && api.requestFields.length) {
+    blocks.push(bodyText('Required request fields:'));
+    api.requestFields.forEach((field) => blocks.push(bullet(field)));
+  }
+
+  if (api.response) {
+    blocks.push(bodyText('Expected response:'));
+    blocks.push(bodyText(api.response));
+  }
+
+  if (Array.isArray(api.errors) && api.errors.length) {
+    blocks.push(bodyText('Important error responses:'));
+    api.errors.forEach((err) => blocks.push(bullet(err)));
+  }
+
+  return blocks;
+}
+
+/**
+ * Renders a Source → DB column mapping table for create / update / external.
+ * Skipped when the mapping array is empty so docs stay free of noise.
+ */
+function renderMappingSection(title, rows) {
+  if (!Array.isArray(rows) || !rows.length) return [];
+
+  return [
+    heading2(title),
+    createTable(
+      ['Source field', 'Database column', 'Notes'],
+      rows.map((row) => [
+        row.sourceField || '',
+        row.databaseColumn || '',
+        row.notes || '',
+      ])
+    ),
+    bodyText(''),
+  ];
+}
+
+/**
  * Converts validated backend-design JSON into a DOCX file.
  * Content drives sections; styles.js owns branding/layout.
  */
@@ -54,6 +104,12 @@ async function generateBackendDesign(content, outputPath) {
     err.validationErrors = errors;
     throw err;
   }
+
+  const dataMapping = content.dataMapping || {};
+  const hasAnyMapping =
+    (dataMapping.create && dataMapping.create.length) ||
+    (dataMapping.update && dataMapping.update.length) ||
+    (dataMapping.external && dataMapping.external.length);
 
   const children = [
     ...titleBlock({
@@ -74,13 +130,20 @@ async function generateBackendDesign(content, outputPath) {
       : [mutedText('No tables defined.')]),
 
     heading1('3. APIs'),
-    createTable(
-      ['Method', 'Route', 'Purpose'],
-      content.apis.map((api) => [api.method, api.route, api.purpose])
-    ),
-    bodyText(''),
+    ...(content.apis.length
+      ? content.apis.flatMap((api, index) => renderApiSection(api, index))
+      : [mutedText('No APIs defined.')]),
 
-    heading1('4. Core Flows'),
+    heading1('4. Data Mapping'),
+    ...(hasAnyMapping
+      ? [
+          ...renderMappingSection('Create Mapping', dataMapping.create),
+          ...renderMappingSection('Update Mapping', dataMapping.update),
+          ...renderMappingSection('External API Response Mapping', dataMapping.external),
+        ]
+      : [mutedText('No data mappings defined.')]),
+
+    heading1('5. Core Flows'),
     ...(content.coreFlows.length
       ? content.coreFlows.flatMap((flow, index) => {
           const steps = Array.isArray(flow.steps) ? flow.steps : [];
@@ -92,7 +155,7 @@ async function generateBackendDesign(content, outputPath) {
         })
       : [mutedText('No core flows defined.')]),
 
-    heading1('5. Core Logic'),
+    heading1('6. Core Business Logic'),
     ...(content.coreLogic.length
       ? content.coreLogic.flatMap((item) => [
           heading2(item.title || 'Logic'),
@@ -100,12 +163,12 @@ async function generateBackendDesign(content, outputPath) {
         ])
       : [mutedText('No core logic defined.')]),
 
-    heading1('6. Validation & Rules'),
+    heading1('7. Validations and Error Handling'),
+    heading2('Validations & Business Constraints'),
     ...(content.validationRules.length
       ? content.validationRules.map(bullet)
       : [mutedText('No validation rules defined.')]),
-
-    heading1('7. Edge Cases'),
+    heading2('Failure Scenarios & Edge Cases'),
     ...(content.edgeCases.length
       ? content.edgeCases.map(bullet)
       : [mutedText('No edge cases defined.')]),

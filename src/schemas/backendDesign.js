@@ -1,6 +1,7 @@
 /**
  * Lightweight validation for backend design doc JSON.
- * Fails early with clear messages so Word generation never runs on incomplete content.
+ * Shape mirrors the Cursor "Create a Backend Design Document" rule so
+ * Word generation fails early on incomplete, non-implementable content.
  */
 
 const REQUIRED_TOP_LEVEL = [
@@ -20,7 +21,7 @@ function assert(condition, message, errors) {
 
 /**
  * Validates content shape before DOCX generation.
- * Assumes a plain JSON object authored for the backend-design template.
+ * dataMapping is optional so older example JSON files keep working.
  */
 function validateBackendDesign(content) {
   const errors = [];
@@ -60,6 +61,40 @@ function validateBackendDesign(content) {
       assert(api.method, `apis[${i}].method is required`, errors);
       assert(api.route, `apis[${i}].route is required`, errors);
       assert(api.purpose, `apis[${i}].purpose is required`, errors);
+      if (api.requestFields != null) {
+        assert(
+          Array.isArray(api.requestFields),
+          `apis[${i}].requestFields must be an array`,
+          errors
+        );
+      }
+      if (api.errors != null) {
+        assert(Array.isArray(api.errors), `apis[${i}].errors must be an array`, errors);
+      }
+    });
+  }
+
+  if (content.dataMapping != null) {
+    assert(
+      typeof content.dataMapping === 'object' && !Array.isArray(content.dataMapping),
+      'dataMapping must be an object',
+      errors
+    );
+    ['create', 'update', 'external'].forEach((key) => {
+      if (content.dataMapping[key] != null) {
+        assert(
+          Array.isArray(content.dataMapping[key]),
+          `dataMapping.${key} must be an array of { sourceField, databaseColumn, notes }`,
+          errors
+        );
+        content.dataMapping[key].forEach((row, i) => {
+          assert(
+            row && (row.sourceField || row.databaseColumn),
+            `dataMapping.${key}[${i}] needs sourceField and/or databaseColumn`,
+            errors
+          );
+        });
+      }
     });
   }
 
